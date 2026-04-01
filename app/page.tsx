@@ -171,8 +171,9 @@ function InventoryPage() {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
 
   // Request States
-  const [requestModal, setRequestModal] = useState<{ item: InventoryItem; type: 'take' | 'return' } | null>(null);
+  const [requestModal, setRequestModal] = useState<{ item?: InventoryItem; type: 'take' | 'return' | 'request' } | null>(null);
   const [requestQuantity, setRequestQuantity] = useState(1);
+  const [requestItemName, setRequestItemName] = useState('');
   const [requestNote, setRequestNote] = useState('');
   const [showRequests, setShowRequests] = useState(false);
 
@@ -449,12 +450,15 @@ function InventoryPage() {
     const { item, type } = requestModal;
     const quantity = requestQuantity;
     const note = requestNote;
+    const itemName = item ? item.name : requestItemName;
+    
+    if (!itemName) return;
     
     const requestId = `REQ-${Date.now()}`;
     const newRequest: InventoryRequest = {
       id: requestId,
-      itemId: item.id,
-      itemName: item.name,
+      itemId: item?.id,
+      itemName,
       userId: user.uid,
       userName: user.displayName || 'Anonymous',
       userEmail: user.email || '',
@@ -468,20 +472,37 @@ function InventoryPage() {
 
     try {
       await setDoc(doc(db, 'requests', requestId), newRequest);
-      await updateLastAction(`Request to ${type} ${quantity}x ${item.name} submitted`);
+      await updateLastAction(`Request to ${type} ${quantity}x ${itemName} submitted`);
       setStatus(`Request submitted successfully`);
       setRequestModal(null);
       setRequestQuantity(1);
       setRequestNote('');
+      setRequestItemName('');
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, `requests/${requestId}`);
     }
-  }, [user, requestModal, requestQuantity, requestNote, updateLastAction]);
+  }, [user, requestModal, requestQuantity, requestNote, requestItemName, updateLastAction]);
 
   const handleApproveRequest = useCallback(async (request: InventoryRequest) => {
     if (!isAdmin) return;
 
     try {
+      if (request.type === 'request') {
+        // Just approve the request for a new item
+        await updateDoc(doc(db, 'requests', request.id), {
+          status: 'approved',
+          updatedAt: new Date().toISOString()
+        });
+        await updateLastAction(`Approved new item request for ${request.itemName}`);
+        setStatus(`Request approved`);
+        return;
+      }
+
+      if (!request.itemId) {
+        setStatus('Error: Item ID missing');
+        return;
+      }
+
       const itemRef = doc(db, 'inventory', request.itemId);
       const itemSnap = await getDoc(itemRef);
       
@@ -499,7 +520,7 @@ function InventoryPage() {
           return;
         }
         newQuantity -= request.quantity;
-      } else {
+      } else if (request.type === 'return') {
         newQuantity += request.quantity;
       }
 
@@ -645,6 +666,12 @@ function InventoryPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <button 
+            onClick={() => setRequestModal({ type: 'request' })}
+            className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg text-xs font-bold hover:bg-purple-700 transition-all active:scale-95 shadow-md shadow-purple-100"
+          >
+            <Plus className="w-4 h-4" /> New Request
+          </button>
           <button 
             onClick={() => setShowRequests(!showRequests)}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${
@@ -1276,12 +1303,29 @@ function InventoryPage() {
               className="bg-white rounded-2xl p-8 w-full max-w-sm shadow-2xl border border-gray-100"
             >
               <div className={`w-12 h-12 rounded-xl flex items-center justify-center mb-6 ${
-                requestModal.type === 'take' ? 'bg-blue-50 text-blue-600' : 'bg-green-50 text-green-600'
+                requestModal.type === 'take' ? 'bg-blue-50 text-blue-600' : 
+                requestModal.type === 'return' ? 'bg-green-50 text-green-600' :
+                'bg-purple-50 text-purple-600'
               }`}>
-                {requestModal.type === 'take' ? <ArrowRightLeft className="w-6 h-6" /> : <RefreshCcw className="w-6 h-6" />}
+                {requestModal.type === 'take' ? <ArrowRightLeft className="w-6 h-6" /> : 
+                 requestModal.type === 'return' ? <RefreshCcw className="w-6 h-6" /> :
+                 <Plus className="w-6 h-6" />}
               </div>
               <h3 className="text-lg font-bold text-gray-900 mb-1 capitalize">{requestModal.type} Item</h3>
-              <p className="text-xs text-gray-500 mb-6">{requestModal.item.name}</p>
+              {requestModal.item ? (
+                <p className="text-xs text-gray-500 mb-6">{requestModal.item.name}</p>
+              ) : (
+                <div className="mb-6">
+                  <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1 tracking-wider">Item Name</label>
+                  <input 
+                    type="text"
+                    className="w-full border border-gray-100 rounded-xl p-3 text-sm font-bold focus:border-blue-500 outline-none bg-gray-50/50"
+                    placeholder="What do you need?"
+                    value={requestItemName}
+                    onChange={e => setRequestItemName(e.target.value)}
+                  />
+                </div>
+              )}
               
               <div className="space-y-4 mb-8">
                 <div>
@@ -1289,7 +1333,7 @@ function InventoryPage() {
                   <input 
                     type="number"
                     min="1"
-                    max={requestModal.type === 'take' ? requestModal.item.quantity : undefined}
+                    max={requestModal.type === 'take' ? requestModal.item?.quantity : undefined}
                     className="w-full border border-gray-100 rounded-xl p-3 text-sm font-bold focus:border-blue-500 outline-none bg-gray-50/50"
                     value={requestQuantity}
                     onChange={e => setRequestQuantity(parseInt(e.target.value) || 1)}
@@ -1316,7 +1360,9 @@ function InventoryPage() {
                 <button 
                   onClick={handleRequest}
                   className={`flex-1 px-4 py-3 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-lg active:scale-95 ${
-                    requestModal.type === 'take' ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-100' : 'bg-green-600 hover:bg-green-700 shadow-green-100'
+                    requestModal.type === 'take' ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-100' : 
+                    requestModal.type === 'return' ? 'bg-green-600 hover:bg-green-700 shadow-green-100' :
+                    'bg-purple-600 hover:bg-purple-700 shadow-purple-100'
                   }`}
                 >
                   Submit Request

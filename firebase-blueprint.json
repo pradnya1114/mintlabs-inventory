@@ -29,23 +29,23 @@
     },
     "InventoryRequest": {
       "title": "Inventory Request",
-      "description": "A request to take or return an item",
+      "description": "A request to take, return, or request a new item",
       "type": "object",
       "properties": {
         "id": { "type": "string", "description": "Unique ID for the request" },
-        "itemId": { "type": "string", "description": "ID of the item" },
+        "itemId": { "type": "string", "description": "ID of the item (optional for new requests)" },
         "itemName": { "type": "string", "description": "Name of the item" },
         "userId": { "type": "string", "description": "ID of the user" },
         "userName": { "type": "string", "description": "Name of the user" },
         "userEmail": { "type": "string", "description": "Email of the user" },
-        "type": { "type": "string", "enum": ["take", "return"], "description": "Type of request" },
+        "type": { "type": "string", "enum": ["take", "return", "request"], "description": "Type of request" },
         "status": { "type": "string", "enum": ["pending", "approved", "rejected", "completed"], "description": "Status of request" },
         "quantity": { "type": "number", "description": "Quantity requested" },
         "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Last update timestamp" },
         "note": { "type": "string", "description": "Optional note" }
       },
-      "required": ["id", "itemId", "itemName", "userId", "userName", "userEmail", "type", "status", "quantity", "createdAt", "updatedAt"]
+      "required": ["id", "itemName", "userId", "userName", "userEmail", "type", "status", "quantity", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
