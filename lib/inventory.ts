@@ -11,8 +11,24 @@ export interface InventoryItem {
   updatedBy?: string;
 }
 
+export interface InventoryRequest {
+  id: string;
+  itemId: string;
+  itemName: string;
+  userId: string;
+  userName: string;
+  userEmail: string;
+  type: 'take' | 'return';
+  status: 'pending' | 'approved' | 'rejected' | 'completed';
+  quantity: number;
+  createdAt: string;
+  updatedAt: string;
+  note?: string;
+}
+
 export interface InventoryData {
   items: InventoryItem[];
+  requests: InventoryRequest[];
   lastAction: string;
 }
 

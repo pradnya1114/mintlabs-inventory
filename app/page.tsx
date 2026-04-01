@@ -19,10 +19,16 @@ import {
   Folder,
   FileText,
   LogIn,
-  User
+  User,
+  ArrowUpDown,
+  CheckCircle,
+  XCircle,
+  Clock,
+  ClipboardList,
+  ArrowRightLeft
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { InventoryItem, InventoryData, CUPBOARDS, SHELVES, CATEGORIES, generateId } from '@/lib/inventory';
+import { InventoryItem, InventoryRequest, InventoryData, CUPBOARDS, SHELVES, CATEGORIES, generateId } from '@/lib/inventory';
 import { auth, db } from '@/firebase';
 import { 
   onAuthStateChanged, 
@@ -42,7 +48,8 @@ import {
   query,
   orderBy,
   Timestamp,
-  writeBatch
+  writeBatch,
+  updateDoc
 } from 'firebase/firestore';
 
 // Error Handling Enums and Interfaces
@@ -151,7 +158,7 @@ export default function InventoryPageWrapper() {
 }
 
 function InventoryPage() {
-  const [data, setData] = useState<InventoryData>({ items: [], lastAction: 'Initializing...' });
+  const [data, setData] = useState<InventoryData>({ items: [], requests: [], lastAction: 'Initializing...' });
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -159,6 +166,16 @@ function InventoryPage() {
   const [exports, setExports] = useState<string[]>([]);
   const [confirmModal, setConfirmModal] = useState<{ message: string; onConfirm: () => void } | null>(null);
   
+  // Sorting States
+  const [sortBy, setSortBy] = useState<'name' | 'quantity' | 'updatedAt'>('name');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+
+  // Request States
+  const [requestModal, setRequestModal] = useState<{ item: InventoryItem; type: 'take' | 'return' } | null>(null);
+  const [requestQuantity, setRequestQuantity] = useState(1);
+  const [requestNote, setRequestNote] = useState('');
+  const [showRequests, setShowRequests] = useState(false);
+
   // Form States
   const [newItem, setNewItem] = useState({ 
     name: '', 
@@ -211,6 +228,7 @@ function InventoryPage() {
 
     const inventoryPath = 'inventory';
     const metadataPath = 'metadata';
+    const requestsPath = 'requests';
 
     const unsubscribeInventory = onSnapshot(collection(db, inventoryPath), (snapshot) => {
       const items = snapshot.docs.map(doc => doc.data() as InventoryItem);
@@ -229,9 +247,17 @@ function InventoryPage() {
       handleFirestoreError(error, OperationType.GET, `${metadataPath}/app`);
     });
 
+    const unsubscribeRequests = onSnapshot(collection(db, requestsPath), (snapshot) => {
+      const requests = snapshot.docs.map(doc => doc.data() as InventoryRequest);
+      setData(prev => ({ ...prev, requests }));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, requestsPath);
+    });
+
     return () => {
       unsubscribeInventory();
       unsubscribeMetadata();
+      unsubscribeRequests();
     };
   }, [isAuthReady, user]);
 
@@ -417,14 +443,126 @@ function InventoryPage() {
     }
   }, [data.items, fetchExports]);
 
+  const handleRequest = useCallback(async () => {
+    if (!user || !requestModal) return;
+    
+    const { item, type } = requestModal;
+    const quantity = requestQuantity;
+    const note = requestNote;
+    
+    const requestId = `REQ-${Date.now()}`;
+    const newRequest: InventoryRequest = {
+      id: requestId,
+      itemId: item.id,
+      itemName: item.name,
+      userId: user.uid,
+      userName: user.displayName || 'Anonymous',
+      userEmail: user.email || '',
+      type,
+      status: 'pending',
+      quantity,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      note
+    };
+
+    try {
+      await setDoc(doc(db, 'requests', requestId), newRequest);
+      await updateLastAction(`Request to ${type} ${quantity}x ${item.name} submitted`);
+      setStatus(`Request submitted successfully`);
+      setRequestModal(null);
+      setRequestQuantity(1);
+      setRequestNote('');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `requests/${requestId}`);
+    }
+  }, [user, requestModal, requestQuantity, requestNote, updateLastAction]);
+
+  const handleApproveRequest = useCallback(async (request: InventoryRequest) => {
+    if (!isAdmin) return;
+
+    try {
+      const itemRef = doc(db, 'inventory', request.itemId);
+      const itemSnap = await getDoc(itemRef);
+      
+      if (!itemSnap.exists()) {
+        setStatus('Error: Item not found');
+        return;
+      }
+
+      const itemData = itemSnap.data() as InventoryItem;
+      let newQuantity = itemData.quantity;
+
+      if (request.type === 'take') {
+        if (itemData.quantity < request.quantity) {
+          setStatus('Error: Insufficient stock');
+          return;
+        }
+        newQuantity -= request.quantity;
+      } else {
+        newQuantity += request.quantity;
+      }
+
+      // Update inventory
+      await updateDoc(itemRef, {
+        quantity: newQuantity,
+        updatedAt: new Date().toISOString(),
+        updatedBy: user?.uid
+      });
+
+      // Update request status
+      await updateDoc(doc(db, 'requests', request.id), {
+        status: 'approved',
+        updatedAt: new Date().toISOString()
+      });
+
+      await updateLastAction(`Approved ${request.type} request for ${request.itemName}`);
+      setStatus(`Request approved`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `requests/${request.id}`);
+    }
+  }, [isAdmin, user, updateLastAction]);
+
+  const handleRejectRequest = useCallback(async (request: InventoryRequest) => {
+    if (!isAdmin) return;
+
+    try {
+      await updateDoc(doc(db, 'requests', request.id), {
+        status: 'rejected',
+        updatedAt: new Date().toISOString()
+      });
+
+      await updateLastAction(`Rejected ${request.type} request for ${request.itemName}`);
+      setStatus(`Request rejected`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `requests/${request.id}`);
+    }
+  }, [isAdmin, updateLastAction]);
+
   const filteredItems = useMemo(() => {
     return data.items.filter(item => {
       const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                           item.id.toLowerCase().includes(searchQuery.toLowerCase());
+                           item.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                           item.serialNumber?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                           item.modelNumber?.toLowerCase().includes(searchQuery.toLowerCase());
       const matchesCategory = selectedCategory === 'Master' || item.category === selectedCategory;
       return matchesSearch && matchesCategory;
     });
   }, [data.items, searchQuery, selectedCategory]);
+
+  const sortedItems = useMemo(() => {
+    return [...filteredItems].sort((a, b) => {
+      let comparison = 0;
+      if (sortBy === 'name') {
+        comparison = a.name.localeCompare(b.name);
+      } else if (sortBy === 'quantity') {
+        comparison = a.quantity - b.quantity;
+      } else if (sortBy === 'updatedAt') {
+        comparison = (a.updatedAt || '').localeCompare(b.updatedAt || '');
+      }
+      return sortOrder === 'asc' ? comparison : -comparison;
+    });
+  }, [filteredItems, sortBy, sortOrder]);
 
   const stats = useMemo(() => {
     const totalItems = data.items.length;
@@ -507,6 +645,22 @@ function InventoryPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <button 
+            onClick={() => setShowRequests(!showRequests)}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 ${
+              showRequests 
+                ? 'bg-blue-600 text-white shadow-lg shadow-blue-100' 
+                : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            <ClipboardList className="w-4 h-4" /> 
+            Requests
+            {data.requests.filter(r => r.status === 'pending').length > 0 && (
+              <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full ml-1">
+                {data.requests.filter(r => r.status === 'pending').length}
+              </span>
+            )}
+          </button>
           <button 
             onClick={exportToCSV}
             className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-all active:scale-95"
@@ -684,6 +838,28 @@ function InventoryPage() {
                     <RefreshCcw className="w-5 h-5 text-blue-600" />
                   </div>
                 </div>
+
+                <div className="col-span-2 pt-4 border-t border-gray-100">
+                  <label className="block text-[10px] uppercase font-bold text-gray-400 mb-2 tracking-wider">Sort Inventory By</label>
+                  <div className="flex gap-2">
+                    <select 
+                      className="flex-1 border border-gray-100 rounded-xl p-2.5 text-xs font-bold focus:border-blue-500 outline-none bg-gray-50/50"
+                      value={sortBy}
+                      onChange={e => setSortBy(e.target.value as any)}
+                    >
+                      <option value="name">Name</option>
+                      <option value="quantity">Quantity</option>
+                      <option value="updatedAt">Last Updated</option>
+                    </select>
+                    <button 
+                      onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+                      className="p-2.5 border border-gray-100 rounded-xl bg-gray-50/50 hover:bg-gray-100 transition-all active:scale-95"
+                    >
+                      <ArrowUpDown className={`w-4 h-4 text-gray-600 transition-transform ${sortOrder === 'desc' ? 'rotate-180' : ''}`} />
+                    </button>
+                  </div>
+                </div>
+
                 {CUPBOARDS.map(c => (
                   <div key={c} className="bg-gray-50/50 border border-gray-100 rounded-xl p-3 flex justify-between items-center">
                     <span className="text-[10px] font-bold text-gray-500 uppercase">C{c}</span>
@@ -738,9 +914,116 @@ function InventoryPage() {
           </section>
         </div>
 
-        {/* Right Panel: Inventory Display */}
+        {/* Right Panel: Inventory Display or Requests */}
         <div className="lg:col-span-8">
-          <section className="bg-white rounded-2xl border border-gray-100 h-full flex flex-col shadow-sm overflow-hidden">
+          {showRequests ? (
+            <section className="bg-white rounded-2xl border border-gray-100 h-full flex flex-col shadow-sm overflow-hidden">
+              <div className="p-5 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 bg-blue-600 text-white rounded-lg flex items-center justify-center shadow-md">
+                    <ClipboardList className="w-4 h-4" />
+                  </div>
+                  <h2 className="text-sm font-bold text-gray-900 uppercase tracking-tight">Inventory Requests</h2>
+                </div>
+                <button 
+                  onClick={() => setShowRequests(false)}
+                  className="text-[10px] font-bold uppercase text-blue-600 hover:text-blue-700 font-sans"
+                >
+                  Back to Inventory
+                </button>
+              </div>
+              
+              <div className="flex-1 overflow-auto no-scrollbar">
+                <table className="w-full border-collapse">
+                  <thead className="sticky top-0 bg-white/95 backdrop-blur-sm z-10">
+                    <tr className="border-b border-gray-100">
+                      <th className="text-left p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest">User</th>
+                      <th className="text-left p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest">Item</th>
+                      <th className="text-center p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest">Type</th>
+                      <th className="text-center p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest">Qty</th>
+                      <th className="text-center p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest">Status</th>
+                      {isAdmin && <th className="text-center p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest">Actions</th>}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {data.requests.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((req) => (
+                      <tr key={req.id} className="hover:bg-gray-50/50 transition-colors">
+                        <td className="p-5">
+                          <div className="flex flex-col">
+                            <span className="text-xs font-bold text-gray-900">{req.userName}</span>
+                            <span className="text-[10px] text-gray-400">{req.userEmail}</span>
+                          </div>
+                        </td>
+                        <td className="p-5">
+                          <div className="flex flex-col">
+                            <span className="text-xs font-bold text-gray-900">{req.itemName}</span>
+                            <span className="text-[10px] text-gray-400 font-mono">{req.itemId}</span>
+                          </div>
+                        </td>
+                        <td className="p-5 text-center">
+                          <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase ${
+                            req.type === 'take' ? 'bg-blue-50 text-blue-600' : 'bg-green-50 text-green-600'
+                          }`}>
+                            {req.type}
+                          </span>
+                        </td>
+                        <td className="p-5 text-center text-xs font-bold text-gray-900">
+                          {req.quantity}
+                        </td>
+                        <td className="p-5 text-center">
+                          <div className="flex flex-col items-center gap-1">
+                            <span className={`px-2 py-1 rounded text-[10px] font-bold uppercase flex items-center gap-1 ${
+                              req.status === 'pending' ? 'bg-yellow-50 text-yellow-600' :
+                              req.status === 'approved' ? 'bg-green-50 text-green-600' :
+                              req.status === 'rejected' ? 'bg-red-50 text-red-600' :
+                              'bg-gray-50 text-gray-600'
+                            }`}>
+                              {req.status === 'pending' && <Clock className="w-3 h-3" />}
+                              {req.status === 'approved' && <CheckCircle className="w-3 h-3" />}
+                              {req.status === 'rejected' && <XCircle className="w-3 h-3" />}
+                              {req.status}
+                            </span>
+                            {req.note && <span className="text-[9px] text-gray-400 italic max-w-[150px] truncate">&quot;{req.note}&quot;</span>}
+                          </div>
+                        </td>
+                        {isAdmin && (
+                          <td className="p-5">
+                            {req.status === 'pending' && (
+                              <div className="flex items-center justify-center gap-2">
+                                <button 
+                                  onClick={() => handleApproveRequest(req)}
+                                  className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-all active:scale-95"
+                                  title="Approve"
+                                >
+                                  <CheckCircle className="w-4 h-4" />
+                                </button>
+                                <button 
+                                  onClick={() => handleRejectRequest(req)}
+                                  className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-all active:scale-95"
+                                  title="Reject"
+                                >
+                                  <XCircle className="w-4 h-4" />
+                                </button>
+                              </div>
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {data.requests.length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-20 text-center">
+                    <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mb-4">
+                      <ClipboardList className="w-8 h-8 text-gray-200" />
+                    </div>
+                    <p className="text-sm font-bold text-gray-400 uppercase tracking-widest">No requests found</p>
+                  </div>
+                )}
+              </div>
+            </section>
+          ) : (
+            <section className="bg-white rounded-2xl border border-gray-100 h-full flex flex-col shadow-sm overflow-hidden">
             <div className="p-5 border-b border-gray-100 flex items-center justify-between bg-white">
               <div className="flex items-center gap-3">
                 <div className="w-8 h-8 bg-blue-50 text-blue-600 rounded-lg flex items-center justify-center">
@@ -767,15 +1050,37 @@ function InventoryPage() {
                 <thead className="sticky top-0 bg-white/95 backdrop-blur-sm z-10">
                   <tr className="border-b border-gray-100">
                     <th className="text-left p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest w-32">ID</th>
-                    <th className="text-left p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest">Asset Description</th>
-                    <th className="text-center p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest w-24">Qty</th>
+                    <th 
+                      className="text-left p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest cursor-pointer hover:text-blue-600 transition-colors"
+                      onClick={() => {
+                        if (sortBy === 'name') setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+                        else { setSortBy('name'); setSortOrder('asc'); }
+                      }}
+                    >
+                      <div className="flex items-center gap-1">
+                        Asset Description
+                        {sortBy === 'name' && <ArrowUpDown className={`w-3 h-3 ${sortOrder === 'desc' ? 'rotate-180' : ''}`} />}
+                      </div>
+                    </th>
+                    <th 
+                      className="text-center p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest w-24 cursor-pointer hover:text-blue-600 transition-colors"
+                      onClick={() => {
+                        if (sortBy === 'quantity') setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+                        else { setSortBy('quantity'); setSortOrder('asc'); }
+                      }}
+                    >
+                      <div className="flex items-center justify-center gap-1">
+                        Qty
+                        {sortBy === 'quantity' && <ArrowUpDown className={`w-3 h-3 ${sortOrder === 'desc' ? 'rotate-180' : ''}`} />}
+                      </div>
+                    </th>
                     <th className="text-center p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest w-24">Loc</th>
-                    {isAdmin && <th className="text-center p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest w-32">Actions</th>}
+                    <th className="text-center p-5 text-[10px] uppercase font-bold text-gray-400 tracking-widest w-48">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
                   <AnimatePresence mode="popLayout">
-                    {filteredItems.map((item) => (
+                    {sortedItems.map((item) => (
                       <motion.tr 
                         layout
                         initial={{ opacity: 0 }}
@@ -880,35 +1185,48 @@ function InventoryPage() {
                             </div>
                           )}
                         </td>
-                        {isAdmin && (
-                          <td className="p-5">
-                            <div className="flex items-center justify-center gap-2">
-                              {editingId === item.id ? (
+                        <td className="p-5">
+                          <div className="flex items-center justify-center gap-2">
+                            {editingId === item.id ? (
+                              <button 
+                                onClick={handleEditSave}
+                                className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all shadow-md active:scale-90"
+                              >
+                                <CheckCircle className="w-4 h-4" />
+                              </button>
+                            ) : isAdmin ? (
+                              <>
                                 <button 
-                                  onClick={handleEditSave}
-                                  className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all shadow-md active:scale-90"
+                                  onClick={() => handleEditStart(item)}
+                                  className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all active:scale-90"
                                 >
-                                  <Plus className="w-4 h-4 rotate-45" />
+                                  <Edit3 className="w-4 h-4" />
                                 </button>
-                              ) : (
-                                <>
-                                  <button 
-                                    onClick={() => handleEditStart(item)}
-                                    className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all active:scale-90"
-                                  >
-                                    <Edit3 className="w-4 h-4" />
-                                  </button>
-                                  <button 
-                                    onClick={() => handleDeleteItem(item.id)}
-                                    className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all active:scale-90"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </td>
-                        )}
+                                <button 
+                                  onClick={() => handleDeleteItem(item.id)}
+                                  className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all active:scale-90"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </>
+                            ) : (
+                              <div className="flex gap-2">
+                                <button 
+                                  onClick={() => setRequestModal({ item, type: 'take' })}
+                                  className="px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-[10px] font-bold uppercase hover:bg-blue-100 transition-all active:scale-95 flex items-center gap-1"
+                                >
+                                  <ArrowRightLeft className="w-3 h-3" /> Take
+                                </button>
+                                <button 
+                                  onClick={() => setRequestModal({ item, type: 'return' })}
+                                  className="px-3 py-1.5 bg-green-50 text-green-600 rounded-lg text-[10px] font-bold uppercase hover:bg-green-100 transition-all active:scale-95 flex items-center gap-1"
+                                >
+                                  <RefreshCcw className="w-3 h-3" /> Return
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </td>
                       </motion.tr>
                     ))}
                   </AnimatePresence>
@@ -925,6 +1243,7 @@ function InventoryPage() {
               )}
             </div>
           </section>
+        )}
         </div>
       </main>
 
@@ -945,6 +1264,68 @@ function InventoryPage() {
           Last Action: <span className="text-gray-600">{data.lastAction}</span>
         </div>
       </footer>
+
+      {/* Request Modal */}
+      <AnimatePresence>
+        {requestModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/40 backdrop-blur-md">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white rounded-2xl p-8 w-full max-w-sm shadow-2xl border border-gray-100"
+            >
+              <div className={`w-12 h-12 rounded-xl flex items-center justify-center mb-6 ${
+                requestModal.type === 'take' ? 'bg-blue-50 text-blue-600' : 'bg-green-50 text-green-600'
+              }`}>
+                {requestModal.type === 'take' ? <ArrowRightLeft className="w-6 h-6" /> : <RefreshCcw className="w-6 h-6" />}
+              </div>
+              <h3 className="text-lg font-bold text-gray-900 mb-1 capitalize">{requestModal.type} Item</h3>
+              <p className="text-xs text-gray-500 mb-6">{requestModal.item.name}</p>
+              
+              <div className="space-y-4 mb-8">
+                <div>
+                  <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1 tracking-wider">Quantity</label>
+                  <input 
+                    type="number"
+                    min="1"
+                    max={requestModal.type === 'take' ? requestModal.item.quantity : undefined}
+                    className="w-full border border-gray-100 rounded-xl p-3 text-sm font-bold focus:border-blue-500 outline-none bg-gray-50/50"
+                    value={requestQuantity}
+                    onChange={e => setRequestQuantity(parseInt(e.target.value) || 1)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1 tracking-wider">Note (Optional)</label>
+                  <textarea 
+                    className="w-full border border-gray-100 rounded-xl p-3 text-sm font-bold focus:border-blue-500 outline-none bg-gray-50/50 min-h-[80px] resize-none"
+                    placeholder="Why do you need this?"
+                    value={requestNote}
+                    onChange={e => setRequestNote(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => setRequestModal(null)}
+                  className="flex-1 px-4 py-3 bg-gray-50 text-gray-600 rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-gray-100 transition-all"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleRequest}
+                  className={`flex-1 px-4 py-3 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-lg active:scale-95 ${
+                    requestModal.type === 'take' ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-100' : 'bg-green-600 hover:bg-green-700 shadow-green-100'
+                  }`}
+                >
+                  Submit Request
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Confirmation Modal */}
       <AnimatePresence>

@@ -78,6 +78,21 @@ service cloud.firestore {
              isValidDateString(data.updatedAt);
     }
 
+    function isValidRequest(data) {
+      return hasRequiredFields(['id', 'itemId', 'itemName', 'userId', 'userName', 'userEmail', 'type', 'status', 'quantity', 'createdAt', 'updatedAt']) &&
+             hasOnlyAllowedFields(['id', 'itemId', 'itemName', 'userId', 'userName', 'userEmail', 'type', 'status', 'quantity', 'createdAt', 'updatedAt', 'note']) &&
+             data.id is string && data.id.size() > 0 &&
+             data.itemId is string && data.itemId.size() > 0 &&
+             data.itemName is string && data.itemName.size() > 0 &&
+             data.userId is string && (resource == null ? data.userId == request.auth.uid : data.userId == resource.data.userId) &&
+             data.type in ['take', 'return'] &&
+             data.status in ['pending', 'approved', 'rejected', 'completed'] &&
+             data.quantity is number && data.quantity > 0 &&
+             isValidDateString(data.createdAt) &&
+             isValidDateString(data.updatedAt) &&
+             (!('note' in data) || (data.note is string && data.note.size() <= 500));
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -90,8 +105,15 @@ service cloud.firestore {
     match /inventory/{itemId} {
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() && isValidInventoryItem(request.resource.data);
-      allow update: if isAuthenticated() && isValidInventoryItem(request.resource.data);
-      allow delete: if isAuthenticated();
+      allow update: if isAuthenticated() && (isValidInventoryItem(request.resource.data) || isAdmin());
+      allow delete: if isAuthenticated() && isAdmin();
+    }
+
+    match /requests/{requestId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.userId || isAdmin());
+      allow create: if isAuthenticated() && isValidRequest(request.resource.data);
+      allow update: if isAuthenticated() && (isAdmin() || (request.auth.uid == resource.data.userId && resource.data.status == 'pending' && isValidRequest(request.resource.data)));
+      allow delete: if isAdmin();
     }
 
     match /metadata/app {

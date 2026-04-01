@@ -20,7 +20,7 @@ async function readData(): Promise<InventoryData> {
     const content = await fs.readFile(DATA_FILE, 'utf-8');
     return JSON.parse(content);
   } catch {
-    return { items: [], lastAction: 'System Initialized' };
+    return { items: [], requests: [], lastAction: 'System Initialized' };
   }
 }
 
