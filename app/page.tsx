@@ -28,6 +28,7 @@ import {
   ArrowRightLeft
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { read, utils } from 'xlsx';
 import { InventoryItem, InventoryRequest, InventoryData, CUPBOARDS, SHELVES, CATEGORIES, generateId } from '@/lib/inventory';
 import { auth, db } from '@/firebase';
 import { 
@@ -185,12 +186,21 @@ function InventoryPage() {
     shelf: 'A', 
     category: CATEGORIES[0],
     serialNumber: '',
-    modelNumber: ''
+    modelNumber: '',
+    imei: '',
+    adapter: '',
+    cable: '',
+    sim: '',
+    box: '',
+    remark: '',
+    working: 'yes'
   });
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('Master');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<InventoryItem | null>(null);
+  const [importPreview, setImportPreview] = useState<InventoryItem[] | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
 
   // Auth Listener
   useEffect(() => {
@@ -333,7 +343,14 @@ function InventoryPage() {
         shelf: 'A', 
         category: selectedCategory === 'Master' ? CATEGORIES[1] : selectedCategory,
         serialNumber: '',
-        modelNumber: ''
+        modelNumber: '',
+        imei: '',
+        adapter: '',
+        cable: '',
+        sim: '',
+        box: '',
+        remark: '',
+        working: 'yes'
       });
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, path);
@@ -358,7 +375,16 @@ function InventoryPage() {
 
   const handleEditStart = useCallback((item: InventoryItem) => {
     setEditingId(item.id);
-    setEditForm({ ...item });
+    setEditForm({
+      ...item,
+      imei: item.imei || '',
+      adapter: item.adapter || '',
+      cable: item.cable || '',
+      sim: item.sim || '',
+      box: item.box || '',
+      remark: item.remark || '',
+      working: item.working || 'yes'
+    });
   }, []);
 
   const handleEditSave = useCallback(async () => {
@@ -399,7 +425,7 @@ function InventoryPage() {
   }, [data.items, updateLastAction]);
 
   const exportToCSV = useCallback(async () => {
-    const headers = ['ID', 'Name', 'Quantity', 'Cupboard', 'Shelf', 'Category', 'Serial Number', 'Model Number'];
+    const headers = ['ID', 'Name', 'Quantity', 'Cupboard', 'Shelf', 'Category', 'Serial Number', 'Model Number', 'IMEI', 'Adapter', 'Cable', 'Sim', 'Box', 'Remark', 'Working'];
     const rows = data.items.map(i => [
       i.id, 
       i.name, 
@@ -408,7 +434,14 @@ function InventoryPage() {
       i.shelf, 
       i.category, 
       i.serialNumber || '', 
-      i.modelNumber || ''
+      i.modelNumber || '',
+      i.imei || '',
+      i.adapter || '',
+      i.cable || '',
+      i.sim || '',
+      i.box || '',
+      i.remark || '',
+      i.working || ''
     ]);
     const csvContent = [headers, ...rows].map(e => e.map(val => `"${val}"`).join(",")).join("\n");
     
@@ -543,6 +576,96 @@ function InventoryPage() {
       handleFirestoreError(error, OperationType.WRITE, `requests/${request.id}`);
     }
   }, [isAdmin, user, updateLastAction]);
+
+  const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const wb = read(bstr, { type: 'binary' });
+        let allParsedItems: InventoryItem[] = [];
+
+        wb.SheetNames.forEach(wsname => {
+          // Skip empty sheets or hidden ones if any
+          const ws = wb.Sheets[wsname];
+          const data = utils.sheet_to_json(ws) as any[];
+          if (data.length === 0) return;
+
+          const parsedItems: InventoryItem[] = data.map((row, index) => {
+            // Mapping based on the provided image columns
+            const name = row['Inventory Description'] || row.name || row.Name || row.item || row.Item || 'Unnamed Item';
+            const quantityStr = String(row.Qy || row.quantity || row.Quantity || row.qty || row.Qty || '0');
+            const quantity = parseInt(quantityStr.replace(/[^0-9]/g, '')) || 0;
+            const cupboard = parseInt(row.Drawer || row.cupboard || row.Cupboard) || 1;
+            const id = row.Inventory || row.id || row.ID || `IMP-${wsname}-${Date.now()}-${index}`;
+            
+            return {
+              id: id.toString().trim(),
+              name: name.toString().trim(),
+              quantity,
+              cupboard,
+              shelf: String(row.shelf || row.Shelf || 'A').toUpperCase(),
+              category: wsname === 'Master' ? (row.Category || row.category || 'Master') : wsname,
+              serialNumber: String(row['Serial No'] || row.serialNumber || row.SerialNumber || row['Serial Number'] || '').trim(),
+              modelNumber: String(row['Model/Make'] || row.modelNumber || row.ModelNumber || row['Model Number'] || '').trim(),
+              imei: String(row.IMEI || row.imei || '').trim(),
+              adapter: String(row.Adpator || row.adapter || '').trim(),
+              cable: String(row.Cable || row.cable || '').trim(),
+              sim: String(row.Sim || row.sim || '').trim(),
+              box: String(row.Box || row.box || '').trim(),
+              remark: String(row.Remark || row.remark || '').trim(),
+              working: String(row.working || row.Working || '').trim(),
+              updatedAt: new Date().toISOString(),
+              updatedBy: user?.uid
+            };
+          });
+
+          allParsedItems = [...allParsedItems, ...parsedItems];
+        });
+
+        // If "Master" sheet exists and has data, and user said "master should contain all data",
+        // we might want to filter out duplicates if we imported from other sheets too.
+        // For now, let's just take all data from all sheets as they seem to be categorized.
+        // If "Master" is indeed a duplicate of all others, we can filter by ID.
+        const uniqueItems = Array.from(new Map(allParsedItems.map(item => [item.id, item])).values());
+
+        setImportPreview(uniqueItems);
+        setStatus(`Parsed ${uniqueItems.length} unique items from ${wb.SheetNames.length} sheets`);
+      } catch (error) {
+        console.error('Excel parsing failed:', error);
+        setStatus('Failed to parse Excel file');
+      }
+    };
+    reader.readAsBinaryString(file);
+    // Reset input
+    e.target.value = '';
+  }, [user]);
+
+  const handleConfirmImport = useCallback(async () => {
+    if (!importPreview || !isAdmin) return;
+    setIsImporting(true);
+    setStatus('Importing items...');
+
+    try {
+      const batch = writeBatch(db);
+      for (const item of importPreview) {
+        const itemRef = doc(db, 'inventory', item.id);
+        batch.set(itemRef, item);
+      }
+      await batch.commit();
+      await updateLastAction(`Imported ${importPreview.length} items from Excel`);
+      setStatus(`Successfully imported ${importPreview.length} items`);
+      setImportPreview(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'inventory/batch');
+      setStatus('Import failed');
+    } finally {
+      setIsImporting(false);
+    }
+  }, [importPreview, isAdmin, updateLastAction]);
 
   const handleRejectRequest = useCallback(async (request: InventoryRequest) => {
     if (!isAdmin) return;
@@ -694,6 +817,23 @@ function InventoryPage() {
           >
             <Download className="w-4 h-4" /> Export CSV
           </button>
+          {isAdmin && (
+            <div className="relative">
+              <input 
+                type="file" 
+                accept=".xlsx, .xls, .csv" 
+                onChange={handleFileUpload}
+                className="hidden" 
+                id="excel-upload"
+              />
+              <label 
+                htmlFor="excel-upload"
+                className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-600 hover:bg-gray-50 hover:border-gray-300 transition-all active:scale-95 cursor-pointer"
+              >
+                <FileText className="w-4 h-4 text-green-600" /> Import Excel
+              </label>
+            </div>
+          )}
           <div className="h-6 w-px bg-gray-200 mx-1"></div>
           <button 
             onClick={handleLogout}
@@ -813,6 +953,77 @@ function InventoryPage() {
                       value={newItem.modelNumber}
                       onChange={e => setNewItem({...newItem, modelNumber: e.target.value})}
                       placeholder="MD-XXXX"
+                    />
+                  </div>
+                  <div className="col-span-1">
+                    <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">IMEI</label>
+                    <input 
+                      type="text" 
+                      className="w-full border border-gray-100 rounded-xl p-3 text-sm focus:border-blue-500 focus:ring-4 focus:ring-blue-500/5 outline-none transition-all bg-gray-50/50"
+                      value={newItem.imei || ''}
+                      onChange={e => setNewItem({...newItem, imei: e.target.value})}
+                      placeholder="IMEI-XXXX"
+                    />
+                  </div>
+                  <div className="col-span-1">
+                    <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">Adapter</label>
+                    <input 
+                      type="text" 
+                      className="w-full border border-gray-100 rounded-xl p-3 text-sm focus:border-blue-500 focus:ring-4 focus:ring-blue-500/5 outline-none transition-all bg-gray-50/50"
+                      value={newItem.adapter || ''}
+                      onChange={e => setNewItem({...newItem, adapter: e.target.value})}
+                      placeholder="Yes/No/Type"
+                    />
+                  </div>
+                  <div className="col-span-1">
+                    <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">Cable</label>
+                    <input 
+                      type="text" 
+                      className="w-full border border-gray-100 rounded-xl p-3 text-sm focus:border-blue-500 focus:ring-4 focus:ring-blue-500/5 outline-none transition-all bg-gray-50/50"
+                      value={newItem.cable || ''}
+                      onChange={e => setNewItem({...newItem, cable: e.target.value})}
+                      placeholder="Yes/No/Type"
+                    />
+                  </div>
+                  <div className="col-span-1">
+                    <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">Sim</label>
+                    <input 
+                      type="text" 
+                      className="w-full border border-gray-100 rounded-xl p-3 text-sm focus:border-blue-500 focus:ring-4 focus:ring-blue-500/5 outline-none transition-all bg-gray-50/50"
+                      value={newItem.sim || ''}
+                      onChange={e => setNewItem({...newItem, sim: e.target.value})}
+                      placeholder="Yes/No/Type"
+                    />
+                  </div>
+                  <div className="col-span-1">
+                    <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">Box</label>
+                    <input 
+                      type="text" 
+                      className="w-full border border-gray-100 rounded-xl p-3 text-sm focus:border-blue-500 focus:ring-4 focus:ring-blue-500/5 outline-none transition-all bg-gray-50/50"
+                      value={newItem.box || ''}
+                      onChange={e => setNewItem({...newItem, box: e.target.value})}
+                      placeholder="Yes/No"
+                    />
+                  </div>
+                  <div className="col-span-1">
+                    <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">Working Status</label>
+                    <select 
+                      className="w-full border border-gray-100 rounded-xl p-3 text-sm focus:border-blue-500 focus:ring-4 focus:ring-blue-500/5 outline-none transition-all bg-gray-50/50"
+                      value={newItem.working || 'yes'}
+                      onChange={e => setNewItem({...newItem, working: e.target.value})}
+                    >
+                      <option value="yes">Yes</option>
+                      <option value="no">No</option>
+                      <option value="partial">Partial</option>
+                    </select>
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-[10px] uppercase font-bold text-gray-400 mb-1.5 tracking-wider">Remark</label>
+                    <textarea 
+                      className="w-full border border-gray-100 rounded-xl p-3 text-sm focus:border-blue-500 focus:ring-4 focus:ring-blue-500/5 outline-none transition-all bg-gray-50/50 min-h-[60px] resize-none"
+                      value={newItem.remark || ''}
+                      onChange={e => setNewItem({...newItem, remark: e.target.value})}
+                      placeholder="Any additional notes..."
                     />
                   </div>
                 </div>
@@ -1141,7 +1352,52 @@ function InventoryPage() {
                                   value={editForm?.modelNumber || ''}
                                   onChange={e => setEditForm(prev => prev ? {...prev, modelNumber: e.target.value} : null)}
                                 />
+                                <input 
+                                  className="border border-gray-200 rounded-lg p-2 bg-white text-[10px] uppercase outline-none focus:border-blue-500 transition-all"
+                                  placeholder="IMEI"
+                                  value={editForm?.imei || ''}
+                                  onChange={e => setEditForm(prev => prev ? {...prev, imei: e.target.value} : null)}
+                                />
+                                <input 
+                                  className="border border-gray-200 rounded-lg p-2 bg-white text-[10px] uppercase outline-none focus:border-blue-500 transition-all"
+                                  placeholder="Adapter"
+                                  value={editForm?.adapter || ''}
+                                  onChange={e => setEditForm(prev => prev ? {...prev, adapter: e.target.value} : null)}
+                                />
+                                <input 
+                                  className="border border-gray-200 rounded-lg p-2 bg-white text-[10px] uppercase outline-none focus:border-blue-500 transition-all"
+                                  placeholder="Cable"
+                                  value={editForm?.cable || ''}
+                                  onChange={e => setEditForm(prev => prev ? {...prev, cable: e.target.value} : null)}
+                                />
+                                <input 
+                                  className="border border-gray-200 rounded-lg p-2 bg-white text-[10px] uppercase outline-none focus:border-blue-500 transition-all"
+                                  placeholder="Sim"
+                                  value={editForm?.sim || ''}
+                                  onChange={e => setEditForm(prev => prev ? {...prev, sim: e.target.value} : null)}
+                                />
+                                <input 
+                                  className="border border-gray-200 rounded-lg p-2 bg-white text-[10px] uppercase outline-none focus:border-blue-500 transition-all"
+                                  placeholder="Box"
+                                  value={editForm?.box || ''}
+                                  onChange={e => setEditForm(prev => prev ? {...prev, box: e.target.value} : null)}
+                                />
+                                <select 
+                                  className="border border-gray-200 rounded-lg p-2 bg-white text-[10px] outline-none focus:border-blue-500 transition-all"
+                                  value={editForm?.working || 'yes'}
+                                  onChange={e => setEditForm(prev => prev ? {...prev, working: e.target.value} : null)}
+                                >
+                                  <option value="yes">Working: Yes</option>
+                                  <option value="no">Working: No</option>
+                                  <option value="partial">Working: Partial</option>
+                                </select>
                               </div>
+                              <textarea 
+                                className="w-full border border-gray-200 rounded-lg p-2 bg-white text-[10px] outline-none focus:border-blue-500 transition-all min-h-[40px] resize-none"
+                                placeholder="Remark"
+                                value={editForm?.remark || ''}
+                                onChange={e => setEditForm(prev => prev ? {...prev, remark: e.target.value} : null)}
+                              />
                               <select 
                                 className="w-full border border-gray-200 rounded-lg p-2 bg-white text-[10px] outline-none focus:border-blue-500 transition-all"
                                 value={editForm?.category || ''}
@@ -1167,7 +1423,29 @@ function InventoryPage() {
                                     MD: <span className="font-mono">{item.modelNumber}</span>
                                   </span>
                                 )}
+                                {item.imei && (
+                                  <span className="text-[9px] text-gray-400 flex items-center gap-1">
+                                    <span className="w-1 h-1 bg-gray-300 rounded-full"></span>
+                                    IMEI: <span className="font-mono">{item.imei}</span>
+                                  </span>
+                                )}
+                                {item.working && (
+                                  <span className={`text-[9px] font-bold uppercase px-1 rounded ${
+                                    item.working.toLowerCase() === 'yes' ? 'text-green-500 bg-green-50' : 'text-red-500 bg-red-50'
+                                  }`}>
+                                    {item.working}
+                                  </span>
+                                )}
                               </div>
+                              {(item.adapter || item.cable || item.sim || item.box || item.remark) && (
+                                <div className="flex flex-wrap gap-2 mt-1.5">
+                                  {item.adapter && <span className="text-[8px] text-gray-400 bg-gray-50 px-1 rounded border border-gray-100">ADP: {item.adapter}</span>}
+                                  {item.cable && <span className="text-[8px] text-gray-400 bg-gray-50 px-1 rounded border border-gray-100">CBL: {item.cable}</span>}
+                                  {item.sim && <span className="text-[8px] text-gray-400 bg-gray-50 px-1 rounded border border-gray-100">SIM: {item.sim}</span>}
+                                  {item.box && <span className="text-[8px] text-gray-400 bg-gray-50 px-1 rounded border border-gray-100">BOX: {item.box}</span>}
+                                  {item.remark && <span className="text-[8px] text-gray-500 italic truncate max-w-[200px]" title={item.remark}>&quot;{item.remark}&quot;</span>}
+                                </div>
+                              )}
                             </div>
                           )}
                         </td>
@@ -1400,6 +1678,87 @@ function InventoryPage() {
                   className="flex-1 px-4 py-3 bg-red-600 text-white rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-red-700 transition-all shadow-lg shadow-red-100"
                 >
                   Confirm
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Import Preview Modal */}
+      <AnimatePresence>
+        {importPreview && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/40 backdrop-blur-md">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-white rounded-2xl p-8 w-full max-w-2xl shadow-2xl border border-gray-100 flex flex-col max-h-[80vh]"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-green-50 text-green-600 rounded-xl flex items-center justify-center">
+                    <FileText className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-gray-900">Import Preview</h3>
+                    <p className="text-xs text-gray-500">Review {importPreview.length} items before uploading</p>
+                  </div>
+                </div>
+                <button onClick={() => setImportPreview(null)} className="text-gray-400 hover:text-gray-600">
+                  <XCircle className="w-6 h-6" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-auto border border-gray-100 rounded-xl mb-6">
+                <table className="w-full text-left text-[10px] border-collapse">
+                  <thead className="bg-gray-50 sticky top-0">
+                    <tr>
+                      <th className="p-2 font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100">ID</th>
+                      <th className="p-2 font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100">Name</th>
+                      <th className="p-2 font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100">Qty</th>
+                      <th className="p-2 font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100">Model</th>
+                      <th className="p-2 font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100">Category</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {importPreview.map((item, i) => (
+                      <tr key={i} className="hover:bg-gray-50/50">
+                        <td className="p-2 font-mono text-blue-600">{item.id}</td>
+                        <td className="p-2 font-medium text-gray-900">{item.name}</td>
+                        <td className="p-2 text-gray-600">{item.quantity}</td>
+                        <td className="p-2 text-gray-600 truncate max-w-[100px]">{item.modelNumber}</td>
+                        <td className="p-2 text-gray-600">{item.category}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => setImportPreview(null)}
+                  disabled={isImporting}
+                  className="flex-1 px-4 py-3 bg-gray-50 text-gray-600 rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-gray-100 transition-all disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleConfirmImport}
+                  disabled={isImporting}
+                  className="flex-1 px-4 py-3 bg-blue-600 text-white rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-blue-700 transition-all shadow-lg shadow-blue-100 active:scale-95 disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isImporting ? (
+                    <>
+                      <RefreshCcw className="w-4 h-4 animate-spin" />
+                      Importing...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle className="w-4 h-4" />
+                      Confirm Import
+                    </>
+                  )}
                 </button>
               </div>
             </motion.div>

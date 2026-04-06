@@ -13,6 +13,13 @@
         "category": { "type": "string", "description": "Item category" },
         "serialNumber": { "type": "string", "description": "Serial number" },
         "modelNumber": { "type": "string", "description": "Model number" },
+        "imei": { "type": "string", "description": "IMEI number" },
+        "adapter": { "type": "string", "description": "Adapter type/status" },
+        "cable": { "type": "string", "description": "Cable type/status" },
+        "sim": { "type": "string", "description": "SIM card status" },
+        "box": { "type": "string", "description": "Box status" },
+        "remark": { "type": "string", "description": "Additional remarks" },
+        "working": { "type": "string", "description": "Working status" },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Last update timestamp" },
         "updatedBy": { "type": "string", "description": "User who last updated the item" }
       },
@@ -63,3 +70,4 @@
     }
   }
 }
+

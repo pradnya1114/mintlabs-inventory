@@ -7,6 +7,13 @@ export interface InventoryItem {
   category: string;
   serialNumber?: string;
   modelNumber?: string;
+  imei?: string;
+  adapter?: string;
+  cable?: string;
+  sim?: string;
+  box?: string;
+  remark?: string;
+  working?: string;
   updatedAt?: string;
   updatedBy?: string;
 }
@@ -37,21 +44,22 @@ export const SHELVES = ['A', 'B', 'C', 'D', 'E', 'F'];
 
 export const CATEGORIES = [
   "Master",
-"Phones and Tablets",
-"Laptops",
-"Keyboard & Mouse",
-"Monitors",
-"Lights",
-"Hardware",
-"Printers",
-"Stands",
-"VR",
-"Sensors",
-"Scanners",
-"Cables",
-"Power Banks",
-"External Storage",
-"Stationery"
+  "Phones and Tablets",
+  "TV",
+  "Laptops",
+  "Sensors",
+  "VR",
+  "Stands",
+  "Printers",
+  "Keyboard & Mouse",
+  "Cables",
+  "Scanners",
+  "Monitors",
+  "Lights",
+  "Hardware",
+  "Power Banks",
+  "External Storage",
+  "Stationery"
 ];
 
 export function generateId(cupboard: number, shelf: string, items: InventoryItem[]): string {
